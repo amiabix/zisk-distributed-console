@@ -138,6 +138,15 @@ message WorkerInfo {
   ComputeCapacity compute_capacity = 3;
   google.protobuf.Timestamp connected_at = 4;
   google.protobuf.Timestamp last_heartbeat = 5;
+  WorkerMetrics metrics = 6; // Optional: worker system metrics
+}
+
+message WorkerMetrics {
+  double cpu_percent = 1;           // CPU usage percentage
+  double memory_used_gb = 2;         // Memory used in GB
+  double memory_total_gb = 3;       // Total memory in GB
+  double network_in_mbps = 4;       // Network incoming MB/s
+  double network_out_mbps = 5;      // Network outgoing MB/s
 }
 
 message LaunchProofResponse {
@@ -179,6 +188,7 @@ message Heartbeat {
 
 message HeartbeatAck {
   string worker_id = 1;
+  WorkerMetrics metrics = 2; // Optional: include worker metrics in heartbeat
 }
 
 message Shutdown {

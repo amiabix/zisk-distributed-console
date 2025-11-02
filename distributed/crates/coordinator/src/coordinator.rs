@@ -150,16 +150,31 @@ impl Coordinator {
             let job_lock = entry.value();
             let job = job_lock.read().await;
 
-            if let JobState::Running(phase) = &job.state() {
-                jobs.push(JobStatusDto {
-                    job_id: job.job_id.clone(),
-                    block_id: job.block.block_id.clone(),
-                    phase: Some(phase.clone()),
-                    state: job.state().clone(),
-                    assigned_workers: job.workers.clone(),
-                    start_time: job.start_time.timestamp() as u64,
-                    duration_ms: job.duration_ms.unwrap_or(0),
-                });
+            // Include both Running and Completed jobs (exclude Failed)
+            match &job.state() {
+                JobState::Running(phase) => {
+                    jobs.push(JobStatusDto {
+                        job_id: job.job_id.clone(),
+                        block_id: job.block.block_id.clone(),
+                        phase: Some(phase.clone()),
+                        state: job.state().clone(),
+                        assigned_workers: job.workers.clone(),
+                        start_time: job.start_time.timestamp() as u64,
+                        duration_ms: job.duration_ms.unwrap_or(0),
+                    });
+                }
+                JobState::Completed => {
+                    jobs.push(JobStatusDto {
+                        job_id: job.job_id.clone(),
+                        block_id: job.block.block_id.clone(),
+                        phase: None, // Completed jobs don't have an active phase
+                        state: job.state().clone(),
+                        assigned_workers: job.workers.clone(),
+                        start_time: job.start_time.timestamp() as u64,
+                        duration_ms: job.duration_ms.unwrap_or(0),
+                    });
+                }
+                _ => {} // Skip Failed or other states
             }
         }
 
@@ -696,16 +711,16 @@ impl Coordinator {
 
     /// Handles heartbeat acknowledgments from workers to maintain liveness tracking.
     ///
-    /// Updates the last known heartbeat timestamp for the worker.
+    /// Updates the last known heartbeat timestamp and metrics for the worker.
     ///
     /// # Parameters
     ///
-    /// * `message` - Heartbeat acknowledgment message containing worker ID
+    /// * `message` - Heartbeat acknowledgment message containing worker ID and optional metrics
     pub async fn handle_stream_heartbeat_ack(
         &self,
         message: HeartbeatAckDto,
     ) -> CoordinatorResult<()> {
-        self.workers_pool.update_last_heartbeat(&message.worker_id).await
+        self.workers_pool.update_last_heartbeat(&message.worker_id, message.metrics).await
     }
 
     /// Handles error reports from workers and marks associated jobs as failed.
@@ -714,8 +729,8 @@ impl Coordinator {
     ///
     /// * `message` - Worker error message containing job ID, worker ID, and error details
     pub async fn handle_stream_error(&self, message: WorkerErrorDto) -> CoordinatorResult<()> {
-        // Update last heartbeat
-        self.workers_pool.update_last_heartbeat(&message.worker_id).await?;
+        // Update last heartbeat (no metrics in error, keep existing)
+        self.workers_pool.update_last_heartbeat(&message.worker_id, None).await?;
 
         error!("Worker {} error: {}", message.worker_id, message.error_message);
 
@@ -766,8 +781,8 @@ impl Coordinator {
         &self,
         message: &ExecuteTaskResponseDto,
     ) -> CoordinatorResult<()> {
-        // Update last heartbeat
-        self.workers_pool.update_last_heartbeat(&message.worker_id).await?;
+        // Update last heartbeat (no metrics in task response, keep existing)
+        self.workers_pool.update_last_heartbeat(&message.worker_id, None).await?;
 
         // Check if job exists
         if !self.jobs.contains_key(&message.job_id) {

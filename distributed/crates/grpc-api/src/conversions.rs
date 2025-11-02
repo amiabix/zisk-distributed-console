@@ -15,8 +15,9 @@ use crate::{
     CoordinatorMessage, ExecuteTaskRequest, ExecuteTaskResponse, Heartbeat, HeartbeatAck,
     JobCancelled, JobStatus, JobStatusResponse, JobsList, JobsListResponse, LaunchProofRequest,
     LaunchProofResponse, Metrics, Proof, ProofList, ProveParams, Shutdown, StatusInfoResponse,
-    SystemStatus, SystemStatusResponse, TaskType, WorkerError, WorkerInfo, WorkerReconnectRequest,
-    WorkerRegisterRequest, WorkerRegisterResponse, WorkersList, WorkersListResponse,
+    SystemStatus, SystemStatusResponse, TaskType, WorkerError, WorkerInfo, WorkerMetrics,
+    WorkerReconnectRequest, WorkerRegisterRequest, WorkerRegisterResponse, WorkersList,
+    WorkersListResponse,
 };
 use zisk_distributed_common::*;
 
@@ -130,6 +131,7 @@ impl From<WorkerInfoDto> for WorkerInfo {
                 seconds: dto.connected_at.timestamp(),
                 nanos: dto.connected_at.timestamp_subsec_nanos() as i32,
             }),
+            metrics: dto.metrics.map(|m| m.into()),
         }
     }
 }
@@ -391,9 +393,36 @@ impl From<ExecuteTaskResponse> for ExecuteTaskResponseDto {
     }
 }
 
+impl From<WorkerMetrics> for WorkerMetricsDto {
+    fn from(metrics: WorkerMetrics) -> Self {
+        WorkerMetricsDto {
+            cpu_percent: metrics.cpu_percent,
+            memory_used_gb: metrics.memory_used_gb,
+            memory_total_gb: metrics.memory_total_gb,
+            network_in_mbps: metrics.network_in_mbps,
+            network_out_mbps: metrics.network_out_mbps,
+        }
+    }
+}
+
+impl From<WorkerMetricsDto> for WorkerMetrics {
+    fn from(dto: WorkerMetricsDto) -> Self {
+        WorkerMetrics {
+            cpu_percent: dto.cpu_percent,
+            memory_used_gb: dto.memory_used_gb,
+            memory_total_gb: dto.memory_total_gb,
+            network_in_mbps: dto.network_in_mbps,
+            network_out_mbps: dto.network_out_mbps,
+        }
+    }
+}
+
 impl From<HeartbeatAck> for HeartbeatAckDto {
     fn from(message: HeartbeatAck) -> Self {
-        HeartbeatAckDto { worker_id: WorkerId::from(message.worker_id) }
+        HeartbeatAckDto {
+            worker_id: WorkerId::from(message.worker_id),
+            metrics: message.metrics.map(|m| m.into()),
+        }
     }
 }
 

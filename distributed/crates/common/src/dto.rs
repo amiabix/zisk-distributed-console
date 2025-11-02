@@ -46,12 +46,22 @@ pub struct WorkersListDto {
     pub workers: Vec<WorkerInfoDto>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorkerMetricsDto {
+    pub cpu_percent: f64,
+    pub memory_used_gb: f64,
+    pub memory_total_gb: f64,
+    pub network_in_mbps: f64,
+    pub network_out_mbps: f64,
+}
+
 pub struct WorkerInfoDto {
     pub worker_id: WorkerId,
     pub state: WorkerState,
     pub compute_capacity: ComputeCapacity,
     pub connected_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
+    pub metrics: Option<WorkerMetricsDto>,
 }
 
 pub struct SystemStatusDto {
@@ -184,6 +194,7 @@ pub enum ExecuteTaskResponseResultDataDto {
 
 pub struct HeartbeatAckDto {
     pub worker_id: WorkerId,
+    pub metrics: Option<WorkerMetricsDto>,
 }
 
 pub struct WorkerErrorDto {

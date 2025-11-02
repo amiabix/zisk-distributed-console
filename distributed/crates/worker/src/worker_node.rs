@@ -7,11 +7,13 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 use tonic::Request;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use zisk_distributed_common::{AggProofData, AggregationParams, BlockContext, WorkerState};
 use zisk_distributed_common::{BlockId, JobId};
 use zisk_distributed_grpc_api::execute_task_response::ResultData;
 use zisk_distributed_grpc_api::*;
+use sysinfo::System;
+use std::sync::{Arc, Mutex};
 
 use crate::config::WorkerServiceConfig;
 
@@ -68,11 +70,18 @@ impl WorkerNodeMpi {
 pub struct WorkerNodeGrpc {
     worker_config: WorkerServiceConfig,
     worker: Worker,
+    system: Arc<Mutex<System>>,
 }
 
 impl WorkerNodeGrpc {
     pub async fn new(worker_config: WorkerServiceConfig, worker: Worker) -> Result<Self> {
-        Ok(Self { worker_config, worker })
+        // Use std::sync::Mutex since we'll access it from spawn_blocking (synchronous context)
+        let system = Arc::new(Mutex::new(System::new_all()));
+        Ok(Self { 
+            worker_config, 
+            worker,
+            system,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -382,15 +391,97 @@ impl WorkerNodeGrpc {
         &self,
         message_sender: &mpsc::UnboundedSender<WorkerMessage>,
     ) -> Result<()> {
+        // Collect system metrics asynchronously (non-blocking)
+        let metrics = match self.collect_system_metrics().await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                warn!("Failed to collect system metrics: {}", e);
+                None // Send heartbeat without metrics on error
+            }
+        };
+        
         let message = WorkerMessage {
             payload: Some(worker_message::Payload::HeartbeatAck(HeartbeatAck {
                 worker_id: self.worker_config.worker.worker_id.as_string(),
+                metrics: metrics.map(|m| m.into()),
             })),
         };
 
         message_sender.send(message)?;
 
         Ok(())
+    }
+
+    /// Collects system metrics with proper CPU delta calculation.
+    /// 
+    /// CPU usage requires two measurements with a delay to calculate the delta.
+    /// This function handles the async delay and validates all metrics.
+    async fn collect_system_metrics(&self) -> Result<WorkerMetrics, String> {
+        let system_clone = Arc::clone(&self.system);
+        
+        // Move blocking sysinfo operations to thread pool to avoid blocking async runtime
+        tokio::task::spawn_blocking(move || {
+            let mut system = system_clone.lock()
+                .map_err(|e| format!("System lock error: {}", e))?;
+            
+            // Refresh all system info
+            system.refresh_all();
+            
+            // CPU usage calculation requires two refreshes with delay
+            // First refresh - baseline measurement
+            system.refresh_cpu_all();
+            
+            // Wait for CPU state to update (required for accurate delta calculation)
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            
+            // Second refresh - get delta
+            system.refresh_cpu_all();
+            
+            // Calculate average CPU usage across all cores
+            let cpu_usage = if !system.cpus().is_empty() {
+                let total: f32 = system.cpus().iter()
+                    .map(|cpu| cpu.cpu_usage())
+                    .sum();
+                total / system.cpus().len() as f32
+            } else {
+                0.0
+            };
+            
+            // Validate and clamp CPU usage to 0-100%
+            let cpu_percent = cpu_usage.clamp(0.0, 100.0) as f64;
+            
+            // Memory usage
+            system.refresh_memory();
+            let memory_used_bytes = system.used_memory() as f64;
+            let memory_total_bytes = system.total_memory() as f64;
+            
+            // Validate memory values
+            if memory_total_bytes <= 0.0 {
+                return Err("Invalid total memory: must be positive".to_string());
+            }
+            
+            let memory_used_gb = memory_used_bytes / (1024.0 * 1024.0 * 1024.0);
+            let memory_total_gb = memory_total_bytes / (1024.0 * 1024.0 * 1024.0);
+            
+            // Ensure used memory doesn't exceed total (can happen due to OS reporting differences)
+            let memory_used_gb = memory_used_gb.min(memory_total_gb).max(0.0);
+            let memory_total_gb = memory_total_gb.max(0.0);
+            
+            // Network usage - placeholder (requires additional sysinfo setup)
+            // TODO: Implement proper network metrics collection using sysinfo networks API
+            let network_in_mbps = 0.0;
+            let network_out_mbps = 0.0;
+            
+            Ok(WorkerMetrics {
+                cpu_percent,
+                memory_used_gb,
+                memory_total_gb,
+                network_in_mbps,
+                network_out_mbps,
+            })
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 
     async fn handle_coordinator_message(
