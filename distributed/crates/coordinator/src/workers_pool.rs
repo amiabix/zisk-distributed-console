@@ -25,7 +25,6 @@ pub struct WorkerInfo {
     pub compute_capacity: ComputeCapacity,
     pub connected_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
-    pub metrics: Option<zisk_distributed_common::WorkerMetricsDto>,
     pub msg_sender: Box<dyn MessageSender + Send + Sync>,
 }
 
@@ -42,16 +41,12 @@ impl WorkerInfo {
             compute_capacity,
             connected_at: now,
             last_heartbeat: now,
-            metrics: None,
             msg_sender,
         }
     }
 
-    pub fn update_last_heartbeat(&mut self, metrics: Option<zisk_distributed_common::WorkerMetricsDto>) {
+    pub fn update_last_heartbeat(&mut self) {
         self.last_heartbeat = Utc::now();
-        if let Some(m) = metrics {
-            self.metrics = Some(m);
-        }
     }
 }
 
@@ -121,7 +116,6 @@ impl WorkersPool {
                 compute_capacity: worker_info.compute_capacity,
                 connected_at: worker_info.connected_at,
                 last_heartbeat: worker_info.last_heartbeat,
-                metrics: worker_info.metrics.clone(),
             })
             .collect();
 
@@ -183,7 +177,7 @@ impl WorkersPool {
                 existing_worker.state = WorkerState::Idle;
                 existing_worker.compute_capacity = compute_capacity.into();
                 existing_worker.msg_sender = msg_sender;
-                existing_worker.update_last_heartbeat(None);
+                existing_worker.update_last_heartbeat();
 
                 info!("Reconnected worker: {} (total: {})", worker_id, self.num_workers().await);
                 Ok(())
@@ -288,19 +282,14 @@ impl WorkersPool {
         }
     }
 
-    /// Updates the last heartbeat timestamp and metrics for a worker.
+    /// Updates the last heartbeat timestamp for a worker.
     ///
     /// # Parameters
     ///
     /// - `worker_id`: Unique identifier for the worker.
-    /// - `metrics`: Optional worker system metrics from heartbeat.
-    pub async fn update_last_heartbeat(
-        &self,
-        worker_id: &WorkerId,
-        metrics: Option<zisk_distributed_common::WorkerMetricsDto>,
-    ) -> CoordinatorResult<()> {
+    pub async fn update_last_heartbeat(&self, worker_id: &WorkerId) -> CoordinatorResult<()> {
         if let Some(worker) = self.workers.write().await.get_mut(worker_id) {
-            worker.update_last_heartbeat(metrics);
+            worker.update_last_heartbeat();
             Ok(())
         } else {
             let msg = format!("Worker {worker_id} not found for heartbeat update");
@@ -376,11 +365,11 @@ impl WorkersPool {
         let mut total_capacity = 0;
 
         // Step 1: Select workers that can cover the required compute capacity
-        for (worker_id, worker_connection) in available_workers {
-            if matches!(worker_connection.state, WorkerState::Idle) {
+        for (worker_id, worker_info) in available_workers {
+            if matches!(worker_info.state, WorkerState::Idle) {
                 selected_workers.push(worker_id.clone());
-                worker_capacities.push(worker_connection.compute_capacity.compute_units);
-                total_capacity += worker_connection.compute_capacity.compute_units;
+                worker_capacities.push(worker_info.compute_capacity.compute_units);
+                total_capacity += worker_info.compute_capacity.compute_units;
 
                 // Stop when we have enough capacity
                 if total_capacity >= required_compute_capacity.compute_units {

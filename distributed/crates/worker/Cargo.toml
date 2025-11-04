@@ -45,4 +45,3 @@ colored = { workspace = true }
 toml = { workspace = true }
 config = { workspace = true }
 uuid = { workspace = true }
-sysinfo = { workspace = true }

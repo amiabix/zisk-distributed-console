@@ -7,13 +7,11 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 use tonic::Request;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use zisk_distributed_common::{AggProofData, AggregationParams, BlockContext, WorkerState};
 use zisk_distributed_common::{BlockId, JobId};
 use zisk_distributed_grpc_api::execute_task_response::ResultData;
 use zisk_distributed_grpc_api::*;
-use sysinfo::System;
-use std::sync::{Arc, Mutex};
 
 use crate::config::WorkerServiceConfig;
 
@@ -70,18 +68,11 @@ impl WorkerNodeMpi {
 pub struct WorkerNodeGrpc {
     worker_config: WorkerServiceConfig,
     worker: Worker,
-    system: Arc<Mutex<System>>,
 }
 
 impl WorkerNodeGrpc {
     pub async fn new(worker_config: WorkerServiceConfig, worker: Worker) -> Result<Self> {
-        // Use std::sync::Mutex since we'll access it from spawn_blocking (synchronous context)
-        let system = Arc::new(Mutex::new(System::new_all()));
-        Ok(Self { 
-            worker_config, 
-            worker,
-            system,
-        })
+        Ok(Self { worker_config, worker })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -212,8 +203,8 @@ impl WorkerNodeGrpc {
             ComputationResult::Proofs { job_id, success, result } => {
                 self.send_proof(job_id, success, result, message_sender).await
             }
-            ComputationResult::AggProof { job_id, success, result } => {
-                self.send_aggregation(job_id, success, result, message_sender).await
+            ComputationResult::AggProof { job_id, success, result, executed_steps } => {
+                self.send_aggregation(job_id, success, result, message_sender, executed_steps).await
             }
         }
     }
@@ -329,40 +320,39 @@ impl WorkerNodeGrpc {
         success: bool,
         result: Result<Option<Vec<Vec<u64>>>>,
         message_sender: &mpsc::UnboundedSender<WorkerMessage>,
+        executed_steps: u64,
     ) -> Result<()> {
         if let Some(handle) = self.worker.take_current_computation() {
             handle.await?;
         }
 
-        let (result_data, error_message) = match result {
+        let mut error_message = String::new();
+        let mut reset_current_job = false;
+
+        let result_data = match result {
             Ok(data) => {
-                assert!(success);
+                if !success {
+                    return Err(anyhow!("Aggregation returned Ok result but reported failure"));
+                }
 
                 if let Some(final_proof) = data {
-                    (
-                        Some(ResultData::FinalProof(FinalProofList {
-                            final_proofs: final_proof
-                                .into_iter()
-                                .map(|v| FinalProof { values: v })
-                                .collect(),
-                        })),
-                        String::new(),
-                    )
+                    reset_current_job = !final_proof.is_empty();
+                    Some(ResultData::FinalProof(FinalProof {
+                        values: final_proof.into_iter().flatten().collect(),
+                        executed_steps,
+                    }))
                 } else {
-                    (None, String::new())
+                    None
                 }
             }
             Err(e) => {
-                // ! FIXME, return an error?
-                assert!(!success);
-                (None, e.to_string())
+                if success {
+                    return Err(anyhow!("Aggregation returned Err but reported success"));
+                }
+                error_message = e.to_string();
+                None
             }
         };
-
-        let reset_current_job = matches!(
-            result_data.as_ref(),
-            Some(ResultData::FinalProof(FinalProofList { final_proofs })) if !final_proofs.is_empty()
-        );
 
         let message = WorkerMessage {
             payload: Some(worker_message::Payload::ExecuteTaskResponse(ExecuteTaskResponse {
@@ -391,97 +381,15 @@ impl WorkerNodeGrpc {
         &self,
         message_sender: &mpsc::UnboundedSender<WorkerMessage>,
     ) -> Result<()> {
-        // Collect system metrics asynchronously (non-blocking)
-        let metrics = match self.collect_system_metrics().await {
-            Ok(m) => Some(m),
-            Err(e) => {
-                warn!("Failed to collect system metrics: {}", e);
-                None // Send heartbeat without metrics on error
-            }
-        };
-        
         let message = WorkerMessage {
             payload: Some(worker_message::Payload::HeartbeatAck(HeartbeatAck {
                 worker_id: self.worker_config.worker.worker_id.as_string(),
-                metrics: metrics.map(|m| m.into()),
             })),
         };
 
         message_sender.send(message)?;
 
         Ok(())
-    }
-
-    /// Collects system metrics with proper CPU delta calculation.
-    /// 
-    /// CPU usage requires two measurements with a delay to calculate the delta.
-    /// This function handles the async delay and validates all metrics.
-    async fn collect_system_metrics(&self) -> Result<WorkerMetrics, String> {
-        let system_clone = Arc::clone(&self.system);
-        
-        // Move blocking sysinfo operations to thread pool to avoid blocking async runtime
-        tokio::task::spawn_blocking(move || {
-            let mut system = system_clone.lock()
-                .map_err(|e| format!("System lock error: {}", e))?;
-            
-            // Refresh all system info
-            system.refresh_all();
-            
-            // CPU usage calculation requires two refreshes with delay
-            // First refresh - baseline measurement
-            system.refresh_cpu_all();
-            
-            // Wait for CPU state to update (required for accurate delta calculation)
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            
-            // Second refresh - get delta
-            system.refresh_cpu_all();
-            
-            // Calculate average CPU usage across all cores
-            let cpu_usage = if !system.cpus().is_empty() {
-                let total: f32 = system.cpus().iter()
-                    .map(|cpu| cpu.cpu_usage())
-                    .sum();
-                total / system.cpus().len() as f32
-            } else {
-                0.0
-            };
-            
-            // Validate and clamp CPU usage to 0-100%
-            let cpu_percent = cpu_usage.clamp(0.0, 100.0) as f64;
-            
-            // Memory usage
-            system.refresh_memory();
-            let memory_used_bytes = system.used_memory() as f64;
-            let memory_total_bytes = system.total_memory() as f64;
-            
-            // Validate memory values
-            if memory_total_bytes <= 0.0 {
-                return Err("Invalid total memory: must be positive".to_string());
-            }
-            
-            let memory_used_gb = memory_used_bytes / (1024.0 * 1024.0 * 1024.0);
-            let memory_total_gb = memory_total_bytes / (1024.0 * 1024.0 * 1024.0);
-            
-            // Ensure used memory doesn't exceed total (can happen due to OS reporting differences)
-            let memory_used_gb = memory_used_gb.min(memory_total_gb).max(0.0);
-            let memory_total_gb = memory_total_gb.max(0.0);
-            
-            // Network usage - placeholder (requires additional sysinfo setup)
-            // TODO: Implement proper network metrics collection using sysinfo networks API
-            let network_in_mbps = 0.0;
-            let network_out_mbps = 0.0;
-            
-            Ok(WorkerMetrics {
-                cpu_percent,
-                memory_used_gb,
-                memory_total_gb,
-                network_in_mbps,
-                network_out_mbps,
-            })
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
     }
 
     async fn handle_coordinator_message(
@@ -593,8 +501,24 @@ impl WorkerNodeGrpc {
     }
 
     fn validate_subdir(base: &Path, candidate: &Path) -> Result<()> {
-        // Canonicalize to resolve symlinks, "..", etc.
         let base = base.canonicalize().map_err(|e| anyhow!("Inputs folder error: {e}"))?;
+
+        // Timeout 60 seconds
+        let timeout = Duration::from_secs(60);
+        let start = std::time::Instant::now();
+
+        while !candidate.exists() {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Input path {:?} did not appear within {:?}",
+                    candidate,
+                    timeout
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Una vez que existe, canonicaliza y valida
         let candidate = candidate.canonicalize().map_err(|e| anyhow!("Input path error: {e}"))?;
 
         if candidate.starts_with(&base) {

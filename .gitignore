@@ -12,6 +12,7 @@
 /cache
 /lib-c/c/build
 /lib-c/c/lib
+/lib-float/c/build
 /logs
 precompiles/keccakf/src/keccakf_fixed.bin
 precompiles/sha256f/src/sha256f_fixed.bin
@@ -19,3 +20,16 @@ state-machines/frequent-ops/src/frequent_ops_fixed.bin
 state-machines/arith/src/arith_frops_fixed.bin
 state-machines/binary/src/binary_basic_frops_fixed.bin
 state-machines/binary/src/binary_extension_frops_fixed.bin
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Log files (explicit)
+gateway-server.log
+distributed-console/gateway-server.log
+
+# OS files
+.DS_Store
+Thumbs.db

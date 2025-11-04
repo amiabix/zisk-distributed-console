@@ -295,7 +295,8 @@ impl ZiskDistributedApi for CoordinatorGrpc {
     ) -> Result<Response<JobsListResponse>, Status> {
         self.validate_admin_request(&request)?;
 
-        let jobs_list = self.coordinator.handle_jobs_list().await;
+        let active_only = request.get_ref().active_only;
+        let jobs_list = self.coordinator.handle_jobs_list(active_only).await;
 
         Ok(Response::new(jobs_list.into()))
     }
